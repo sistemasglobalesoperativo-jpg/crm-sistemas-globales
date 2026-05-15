@@ -492,7 +492,7 @@ select.form-input option{background:#fff;}
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2v10m0 0l-3-3m3 3l3-3M3 17v2a2 2 0 002 2h14a2 2 0 002-2v-2"/></svg>
         Sheets
       </button>
-      <button class="btn-export" style="color:#7c3aed;border-color:#ddd6fe;background:#faf5ff;" onclick="importarDesdeJSON()" title="Importar desde backup JSON">⬆ Importar</button>
+      <button class="btn-export" style="color:#7c3aed;border-color:#ddd6fe;background:#faf5ff;" onclick="importarArchivo()" title="Importar desde CSV (Google Sheets) o JSON">⬆ Importar CSV</button>
       <button class="btn-export" style="color:#0f766e;border-color:#99f6e4;background:#f0fdfa;" onclick="exportarJSON()" title="Exportar backup">💾 Backup</button>
       <button class="btn-export csv" onclick="exportCSV()">⬇ CSV</button>
       <button class="btn-export xlsx" onclick="exportXLSX()">⬇ Excel</button>
@@ -3519,7 +3519,7 @@ function pGenerarPDF(){
 
 
 // ── GOOGLE SHEETS SYNC ────────────────────────────────────────
-const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzBU4CFRyRKINBzuk_zuwlh5-BoLwKr_E2TzdeoBqmKymgMiVgzUsWfzV02fyalqw/exec';
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzGfAhmMOe7N0-lfykOYxFOk7H2LJ2gfFBDLQ85vavKb3fmirr031lUzgDaR6r_XFPv/exec';
 
 function setSyncStatus(msg, color='var(--text-muted)') {
   let el = document.getElementById('sync-indicator');
@@ -3529,9 +3529,37 @@ function setSyncStatus(msg, color='var(--text-muted)') {
 async function sincronizarDesdeSheet() {
   setSyncStatus('⏳ Conectando con Google Sheets...', '#f59e0b');
   try {
-    const res = await fetch(APPS_SCRIPT_URL);
-    if(!res.ok) throw new Error('Error al conectar con el Script (' + res.status + ')');
-    const data = await res.json();
+    // Apps Script no soporta CORS desde archivos locales
+    // Usamos inyección de script (JSONP) para evitar el bloqueo
+    const data = await new Promise((resolve, reject) => {
+      const cbName = '__gsCallback_' + Date.now();
+      const script = document.createElement('script');
+      const timeout = setTimeout(() => {
+        delete window[cbName];
+        script.remove();
+        // Fallback: intentar con fetch directo (funciona desde GitHub Pages)
+        fetch(APPS_SCRIPT_URL)
+          .then(r => r.json())
+          .then(resolve)
+          .catch(() => reject(new Error('No se pudo conectar. Si usas archivo local, sube el CRM a GitHub Pages primero.')));
+      }, 5000);
+      window[cbName] = (d) => {
+        clearTimeout(timeout);
+        delete window[cbName];
+        script.remove();
+        resolve(d);
+      };
+      script.src = APPS_SCRIPT_URL + '?callback=' + cbName;
+      script.onerror = () => {
+        clearTimeout(timeout);
+        // Fallback con fetch
+        fetch(APPS_SCRIPT_URL)
+          .then(r => r.json())
+          .then(resolve)
+          .catch(() => reject(new Error('Error de conexión con Google Sheets')));
+      };
+      document.head.appendChild(script);
+    });
     if(!Array.isArray(data) || data.length === 0)
       throw new Error('El Sheet está vacío o no tiene datos válidos');
 
@@ -3549,11 +3577,11 @@ async function sincronizarDesdeSheet() {
     }
 
     let clientesNuevos = data.map((row, i) => {
-      let nombre = col(row,'nombre','cliente','razon_social');
+      let nombre = col(row,'nombre del cliente','nombre','cliente','razon_social');
       if(!nombre) return null;
       return {
         id:            parseInt(col(row,'id')) || Date.now() + i,
-        pagare:        col(row,'pagare','contrato','id_pagare') || '',
+        pagare:        col(row,'id pagare','pagare','contrato','id_pagare') || '',
         nombre:        nombre.toString(),
         tipoDoc:       col(row,'tipodoc','tipo_doc','tipo') || 'CC',
         cedula:        col(row,'cedula','documento','nit') || '',
@@ -3562,10 +3590,23 @@ async function sincronizarDesdeSheet() {
         email:         col(row,'email','correo') || '',
         placa:         col(row,'placa') || '',
         nVehiculos:    parseInt(col(row,'nvehiculos','n_vehiculos','vehiculos')) || undefined,
-        plan:          col(row,'plan') || 'Reactivación Mensual',
-        inicio:        col(row,'inicio','fecha_inicio','fecha') || '',
-        cuotasPactadas:parseInt(col(row,'cuotaspactadas','cuotas_pactadas','pactadas')) || 1,
-        cuotasPagadas: parseInt(col(row,'cuotaspagadas','cuotas_pagadas','pagadas'))  || 0,
+        plan:          (() => {
+          let p = col(row,'plan de servicio','plan','servicio') || '';
+          if(p.toUpperCase().includes('ESPECIAL') || p.toUpperCase().includes('CLIENTE ESP')) return 'Cliente Especial 10+';
+          if(p.toUpperCase().includes('PREPAGO') || p.toUpperCase().includes('ANUAL')) return 'Reactivación Prepago Anual';
+          if(p.toUpperCase().includes('FINANC')) return 'Financiado';
+          if(p.toUpperCase().includes('CONTADO')) return 'Contado Anual';
+          if(p.toUpperCase().includes('MENSUAL')) return 'Reactivación Mensual';
+          return p || 'Reactivación Mensual';
+        })(),
+        inicio:        (() => {
+          let f = col(row,'fecha inicio','inicio','fecha_inicio','fecha');
+          if(!f) return '';
+          if(f instanceof Date) return f.toISOString().slice(0,10);
+          return f.toString().slice(0,10);
+        })(),
+        cuotasPactadas:parseInt(col(row,'cuotas pactadas','cuotaspactadas','cuotas_pactadas','pactadas')) || 1,
+        cuotasPagadas: parseInt(col(row,'cuotas pagadas','cuotaspagadas','cuotas_pagadas','pagadas'))  || 0,
         obs:           col(row,'obs','observaciones','notas') || '',
         direccion:     col(row,'direccion','address') || '',
         pagos: (() => {
@@ -3647,30 +3688,176 @@ function cargarLocal(){
   return false;
 }
 
-function importarDesdeJSON(){
+function importarArchivo(){
   let input = document.createElement('input');
   input.type = 'file';
-  input.accept = '.json';
+  input.accept = '.csv,.json';
   input.onchange = e => {
     let file = e.target.files[0];
     if(!file) return;
     let reader = new FileReader();
     reader.onload = ev => {
       try {
-        let data = JSON.parse(ev.target.result);
-        if(!Array.isArray(data)) throw new Error('Formato inválido');
-        clients = data;
-        guardarLocal();
-        renderAll();
-        showToast('✅ ' + data.length + ' clientes importados correctamente');
+        let text = ev.target.result;
+        if(file.name.endsWith('.json')){
+          // Importar JSON
+          let data = JSON.parse(text);
+          if(!Array.isArray(data)) throw new Error('JSON inválido');
+          clients = data;
+          guardarLocal(); renderAll();
+          showToast('✅ ' + data.length + ' clientes importados desde JSON');
+        } else {
+          // Importar CSV del Sheet
+          importarDesdeCSV(text);
+        }
       } catch(err){
-        showToast('❌ Error al importar: ' + err.message, 'err');
+        showToast('❌ Error: ' + err.message, 'err');
       }
     };
-    reader.readAsText(file);
+    reader.readAsText(file, 'UTF-8');
   };
   input.click();
 }
+
+function parsearLineaCSV(line){
+  let result=[], cur='', inQ=false;
+  for(let i=0;i<line.length;i++){
+    let c=line[i];
+    if(c==='"'){ inQ=!inQ; }
+    else if(c===','&&!inQ){ result.push(cur.trim()); cur=''; }
+    else { cur+=c; }
+  }
+  result.push(cur.trim());
+  return result;
+}
+
+function normalizarHeader(h){
+  return (h||'').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9]/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'');
+}
+
+function importarDesdeCSV(text){
+  let lines = text.split('\n').map(l=>l.replace(/\r/g,''));
+  // Detectar si hay título en fila 1 (busca la fila con "nombre" o "id")
+  let headerRow = 0;
+  for(let i=0;i<Math.min(5,lines.length);i++){
+    let norm = normalizarHeader(lines[i].split(',')[0]);
+    if(norm.includes('id') || norm.includes('nombre') || norm.includes('pagare')){
+      headerRow = i; break;
+    }
+    // Si la fila no tiene texto útil, prueba la siguiente
+    if(i===0 && lines[0].toLowerCase().includes('control de cartera')) headerRow=1;
+  }
+
+  let headers = parsearLineaCSV(lines[headerRow]).map(normalizarHeader);
+  console.log('Headers detectados:', headers);
+
+  function col(obj, ...keys){
+    for(let k of keys){
+      let nk = normalizarHeader(k);
+      let found = Object.entries(obj).find(([h])=>normalizarHeader(h)===nk || h===nk);
+      if(found && found[1]!=='' && found[1]!==undefined) return found[1];
+    }
+    return '';
+  }
+
+  let importados = [];
+  for(let i=headerRow+1; i<lines.length; i++){
+    if(!lines[i].trim()) continue;
+    let cols = parsearLineaCSV(lines[i]);
+    if(!cols[0]) continue;
+    let obj = {};
+    headers.forEach((h,j)=>{ obj[h] = cols[j]||''; });
+
+    let nombre = obj.nombre_del_cliente || obj.nombre || obj.cliente || '';
+    if(!nombre) continue;
+
+    // Detectar plan
+    let planRaw = (obj.plan_de_servicio || obj.plan || '').toUpperCase();
+    let plan = 'Reactivación Mensual';
+    if(planRaw.includes('ESPECIAL') || planRaw.includes('CLIENTE ESP')) plan='Cliente Especial 10+';
+    else if(planRaw.includes('PREPAGO') || (planRaw.includes('ANUAL') && !planRaw.includes('CONTADO'))) plan='Reactivación Prepago Anual';
+    else if(planRaw.includes('FINANC')) plan='Financiado';
+    else if(planRaw.includes('CONTADO')) plan='Contado Anual';
+    else if(planRaw.includes('MENSUAL')) plan='Reactivación Mensual';
+
+    // Detectar nVehiculos para Cliente Especial
+    let nVeh = undefined;
+    if(plan==='Cliente Especial 10+'){
+      // Contar cuántas filas tienen el mismo nombre (= número de vehículos)
+      let mismo = importados.filter(c=>c.nombre===nombre && c.plan==='Cliente Especial 10+');
+      // Se asignará después de importar todos
+    }
+
+    // Formatear fecha
+    let fechaRaw = obj.fecha_inicio || obj.inicio || obj.fecha || '';
+    let fecha = '';
+    if(fechaRaw){
+      // Intentar parsear fecha en varios formatos
+      let d = new Date(fechaRaw);
+      if(!isNaN(d)) fecha = d.toISOString().slice(0,10);
+      else fecha = fechaRaw.slice(0,10);
+    }
+
+    importados.push({
+      id:             parseInt(obj.id) || Date.now() + i,
+      pagare:         obj.id_pagare || obj.pagare || obj.contrato || '',
+      nombre:         nombre,
+      tipoDoc:        'CC',
+      cedula:         obj.cedula || obj.documento || '',
+      razon:          '',
+      telefono:       obj.telefono || obj.celular || '',
+      email:          obj.email || obj.correo || '',
+      placa:          obj.placa || '',
+      plan:           plan,
+      nVehiculos:     undefined,
+      inicio:         fecha,
+      cuotasPactadas: parseInt(obj.cuotas_pactadas||obj.cuotas_pactada_s||obj.cuotaspactadas)||1,
+      cuotasPagadas:  parseInt(obj.cuotas_pagadas||obj.cuotaspagadas)||0,
+      obs:            obj.obs||obj.observaciones||'',
+      direccion:      obj.direccion||'',
+      pagos:          []
+    });
+  }
+
+  // Para Cliente Especial 10+: agrupar por nombre y asignar nVehiculos
+  let grupos = {};
+  importados.forEach(c=>{
+    if(c.plan==='Cliente Especial 10+'){
+      if(!grupos[c.nombre]) grupos[c.nombre]=0;
+      grupos[c.nombre]++;
+    }
+  });
+  importados.forEach(c=>{
+    if(c.plan==='Cliente Especial 10+' && grupos[c.nombre]){
+      c.nVehiculos = grupos[c.nombre];
+    }
+  });
+
+  if(importados.length===0) throw new Error('No se encontraron clientes válidos en el CSV');
+
+  let modo = confirm(
+    '✅ ' + importados.length + ' registros encontrados en el CSV.\n\n' +
+    'ACEPTAR → Reemplazar todos los clientes del CRM.\n' +
+    'CANCELAR → Combinar con los clientes existentes.'
+  );
+  if(modo){
+    clients = importados;
+  } else {
+    importados.forEach(nuevo=>{
+      let idx=clients.findIndex(x=>x.pagare&&x.pagare===nuevo.pagare);
+      if(idx>=0) clients[idx]={...clients[idx],...nuevo};
+      else clients.push(nuevo);
+    });
+  }
+  guardarLocal();
+  renderAll();
+  showToast('✅ ' + importados.length + ' clientes importados desde Google Sheets CSV');
+}
+
+// Mantener alias para compatibilidad
+function importarDesdeJSON(){ importarArchivo(); }
 
 function exportarJSON(){
   let json = JSON.stringify(clients, null, 2);
