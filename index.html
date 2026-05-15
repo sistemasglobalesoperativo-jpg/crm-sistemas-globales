@@ -488,8 +488,8 @@ select.form-input option{background:#fff;}
         <input class="search-box" type="text" placeholder="Placa, cliente, cédula, NIT..." id="search-input" oninput="filterClients()" style="padding-left:30px;width:220px;">
       </div>
       <span id="sync-indicator" style="font-size:10px;color:var(--text-muted);white-space:nowrap;padding:4px 8px;background:#f8fafb;border:1px solid var(--border);border-radius:6px;">Sin datos guardados</span>
-      <button class="btn-export" style="color:#059669;border-color:#a7f3d0;background:#f0fdf4;font-weight:600;" onclick="importarArchivo()" title="Importar desde CSV de Google Sheets o backup JSON">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right:3px;"><path d="M12 2v10m0 0l-3-3m3 3l3-3M3 17v2a2 2 0 002 2h14a2 2 0 002-2v-2"/></svg>⬆ Importar CSV / Sheets
+      <button class="btn-export" style="color:#059669;border-color:#a7f3d0;background:#f0fdf4;font-weight:600;" onclick="sincronizarDesdeSheet()" title="Sincronizar con Google Sheets via SheetDB">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right:3px;"><path d="M12 2v10m0 0l-3-3m3 3l3-3M3 17v2a2 2 0 002 2h14a2 2 0 002-2v-2"/></svg>⬇ Sheets
       </button>
       <button class="btn-export" style="color:#0f766e;border-color:#99f6e4;background:#f0fdfa;" onclick="exportarJSON()" title="Exportar backup">💾 Backup</button>
       <button class="btn-export csv" onclick="exportCSV()">⬇ CSV</button>
@@ -2527,8 +2527,10 @@ function saveEdit(){
       : undefined
   };
   closeModal('editar');
+  let cEditado = clients.find(x=>x.id===id);
+  if(cEditado){ guardarLocal(); escribirClienteEnSheet(cEditado); }
   renderAll();
-  showToast('Cliente actualizado: '+nombre);
+  showToast('✅ Cambios guardados · Sheet actualizado');
 }
 
 // ── ELIMINAR CLIENTE ──────────────────────────────────────────
@@ -2710,6 +2712,7 @@ function saveClient(){
   });
   closeModal('nuevo');
   guardarLocal();
+  escribirClienteEnSheet(clients[clients.length-1]);
   renderAll();
   showToast('✅ Cliente registrado: '+nombre);
   ['f-nombre','f-placa','f-cedula','f-telefono','f-email','f-obs'].forEach(id=>document.getElementById(id).value='');
@@ -3132,6 +3135,7 @@ function registrarPagoManual() {
   document.getElementById('h-obs').value='';
   renderHistorial(c);
   guardarLocal();
+  escribirClienteEnSheet(c);
   renderAll();
   showToast('✅ Cuota '+ncuota+' registrada · '+fmtFull(valor));
 }
@@ -3516,145 +3520,154 @@ function pGenerarPDF(){
 
 
 
-// ── GOOGLE SHEETS SYNC ────────────────────────────────────────
-const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzGfAhmMOe7N0-lfykOYxFOk7H2LJ2gfFBDLQ85vavKb3fmirr031lUzgDaR6r_XFPv/exec';
+// ── SHEETDB SYNC ─────────────────────────────────────────────
+const SHEETDB_URL = 'https://sheetdb.io/api/v1/5r8kcd9k84d06';
+const SHEET_NAME  = 'BASE DE DATOS';
 
 function setSyncStatus(msg, color='var(--text-muted)') {
   let el = document.getElementById('sync-indicator');
   if(el) { el.textContent = msg; el.style.color = color; }
 }
 
+// ── LEER desde Sheet ─────────────────────────────────────────
 async function sincronizarDesdeSheet() {
   setSyncStatus('⏳ Conectando con Google Sheets...', '#f59e0b');
   try {
-    // Apps Script no soporta CORS desde archivos locales
-    // Usamos inyección de script (JSONP) para evitar el bloqueo
-    const data = await new Promise((resolve, reject) => {
-      const cbName = '__gsCallback_' + Date.now();
-      const script = document.createElement('script');
-      const timeout = setTimeout(() => {
-        delete window[cbName];
-        script.remove();
-        // Fallback: intentar con fetch directo (funciona desde GitHub Pages)
-        fetch(APPS_SCRIPT_URL)
-          .then(r => r.json())
-          .then(resolve)
-          .catch(() => reject(new Error('No se pudo conectar. Si usas archivo local, sube el CRM a GitHub Pages primero.')));
-      }, 5000);
-      window[cbName] = (d) => {
-        clearTimeout(timeout);
-        delete window[cbName];
-        script.remove();
-        resolve(d);
-      };
-      script.src = APPS_SCRIPT_URL + '?callback=' + cbName;
-      script.onerror = () => {
-        clearTimeout(timeout);
-        // Fallback con fetch
-        fetch(APPS_SCRIPT_URL)
-          .then(r => r.json())
-          .then(resolve)
-          .catch(() => reject(new Error('Error de conexión con Google Sheets')));
-      };
-      document.head.appendChild(script);
-    });
+    const res = await fetch(SHEETDB_URL + '?sheet=' + encodeURIComponent(SHEET_NAME));
+    if(!res.ok) throw new Error('Error ' + res.status);
+    const data = await res.json();
     if(!Array.isArray(data) || data.length === 0)
-      throw new Error('El Sheet está vacío o no tiene datos válidos');
+      throw new Error('El Sheet está vacío');
 
-    // Mapear columnas del Sheet a campos del CRM
-    // Acepta cualquier nombre de columna (mayúsculas, tildes, espacios)
     function col(obj, ...keys) {
       for(let k of keys) {
-        // buscar ignorando mayúsculas, tildes y espacios
-        let norm = s => (s||'').toString().toLowerCase()
-          .normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,'_');
-        let val = Object.entries(obj).find(([k2]) => norm(k2) === norm(k));
-        if(val && val[1] !== '' && val[1] !== undefined) return val[1];
+        let nk = k.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'_');
+        let found = Object.entries(obj).find(([h]) => {
+          let nh = h.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'_');
+          return nh === nk;
+        });
+        if(found && found[1] !== '' && found[1] !== undefined) return found[1];
       }
       return '';
     }
 
-    let clientesNuevos = data.map((row, i) => {
-      let nombre = col(row,'nombre del cliente','nombre','cliente','razon_social');
+    let importados = data.map((row, i) => {
+      let nombre = col(row,'NOMBRE DEL CLIENTE','nombre del cliente','nombre','cliente');
       if(!nombre) return null;
+      let planRaw = (col(row,'PLAN DE SERVICIO','plan de servicio','plan') || '').toUpperCase();
+      let plan = 'Reactivación Mensual';
+      if(planRaw.includes('ESPECIAL') || planRaw.includes('CLIENTE ESP')) plan = 'Cliente Especial 10+';
+      else if(planRaw.includes('PREPAGO')) plan = 'Reactivación Prepago Anual';
+      else if(planRaw.includes('FINANC')) plan = 'Financiado';
+      else if(planRaw.includes('CONTADO')) plan = 'Contado Anual';
+      let pagare = col(row,'ID PAGARÉ','id pagare','pagare','contrato') || '';
+      let fecha = col(row,'FECHA INICIO','fecha inicio','inicio') || '';
+      if(fecha && fecha.includes('/')) {
+        let p = fecha.split('/');
+        if(p.length===3) fecha = p[2]+'-'+p[1].padStart(2,'0')+'-'+p[0].padStart(2,'0');
+      }
       return {
-        id:            parseInt(col(row,'id')) || Date.now() + i,
-        pagare:        col(row,'id pagare','pagare','contrato','id_pagare') || '',
-        nombre:        nombre.toString(),
-        tipoDoc:       col(row,'tipodoc','tipo_doc','tipo') || 'CC',
-        cedula:        col(row,'cedula','documento','nit') || '',
-        razon:         col(row,'razon','razon_social') || '',
-        telefono:      col(row,'telefono','celular','tel') || '',
-        email:         col(row,'email','correo') || '',
-        placa:         col(row,'placa') || '',
-        nVehiculos:    parseInt(col(row,'nvehiculos','n_vehiculos','vehiculos')) || undefined,
-        plan:          (() => {
-          let p = col(row,'plan de servicio','plan','servicio') || '';
-          if(p.toUpperCase().includes('ESPECIAL') || p.toUpperCase().includes('CLIENTE ESP')) return 'Cliente Especial 10+';
-          if(p.toUpperCase().includes('PREPAGO') || p.toUpperCase().includes('ANUAL')) return 'Reactivación Prepago Anual';
-          if(p.toUpperCase().includes('FINANC')) return 'Financiado';
-          if(p.toUpperCase().includes('CONTADO')) return 'Contado Anual';
-          if(p.toUpperCase().includes('MENSUAL')) return 'Reactivación Mensual';
-          return p || 'Reactivación Mensual';
-        })(),
-        inicio:        (() => {
-          let f = col(row,'fecha inicio','inicio','fecha_inicio','fecha');
-          if(!f) return '';
-          if(f instanceof Date) return f.toISOString().slice(0,10);
-          return f.toString().slice(0,10);
-        })(),
-        cuotasPactadas:parseInt(col(row,'cuotas pactadas','cuotaspactadas','cuotas_pactadas','pactadas')) || 1,
-        cuotasPagadas: parseInt(col(row,'cuotas pagadas','cuotaspagadas','cuotas_pagadas','pagadas'))  || 0,
-        obs:           col(row,'obs','observaciones','notas') || '',
-        direccion:     col(row,'direccion','address') || '',
-        pagos: (() => {
-          let p = col(row,'pagos');
-          try { return p ? JSON.parse(p) : []; } catch { return []; }
-        })()
+        id:             parseInt(col(row,'id')) || Date.now()+i,
+        pagare,
+        nombre:         nombre.toString(),
+        tipoDoc:        'CC',
+        cedula:         col(row,'CÉDULA','cedula','documento') || '',
+        razon:          '',
+        telefono:       col(row,'TELÉFONO','telefono','celular') || '',
+        email:          col(row,'email','correo') || '',
+        placa:          col(row,'PLACA','placa') || '',
+        plan,
+        nVehiculos:     parseInt(col(row,'nvehiculos','n vehiculos','vehiculos')) || undefined,
+        inicio:         fecha,
+        cuotasPactadas: parseInt(col(row,'CUOTAS PACTADAS','cuotas pactadas','cuotas pactada s')) || 1,
+        cuotasPagadas:  parseInt(col(row,'CUOTAS PAGADAS','cuotas pagadas')) || 0,
+        obs:            col(row,'obs','observaciones') || '',
+        direccion:      col(row,'direccion') || '',
+        pagos:          []
       };
     }).filter(Boolean);
 
-    if(clientesNuevos.length === 0)
-      throw new Error('No se encontraron filas con datos en el Sheet');
+    // Agrupar Cliente Especial 10+ por nombre para asignar nVehiculos
+    let grupos = {};
+    importados.forEach(c => {
+      if(c.plan==='Cliente Especial 10+') {
+        grupos[c.nombre] = (grupos[c.nombre]||0) + 1;
+      }
+    });
+    importados.forEach(c => {
+      if(c.plan==='Cliente Especial 10+') c.nVehiculos = grupos[c.nombre];
+    });
+
+    if(importados.length === 0) throw new Error('No se encontraron clientes válidos');
 
     let modo = confirm(
-      '✅ ' + clientesNuevos.length + ' clientes encontrados en Google Sheets.\n\n' +
-      'ACEPTAR → Reemplazar todos los datos del CRM con los del Sheet.\n' +
-      'CANCELAR → Combinar (agrega nuevos, actualiza existentes).'
+      '✅ ' + importados.length + ' clientes encontrados en Google Sheets.\n\n' +
+      'ACEPTAR → Reemplazar todos los datos del CRM.\n' +
+      'CANCELAR → Combinar con los existentes.'
     );
-
-    if(modo) {
-      clients = clientesNuevos;
-    } else {
-      clientesNuevos.forEach(nuevo => {
-        let idx = clients.findIndex(x => x.id===nuevo.id || (x.pagare && x.pagare===nuevo.pagare));
-        if(idx >= 0) clients[idx] = {...clients[idx], ...nuevo};
+    if(modo) { clients = importados; }
+    else {
+      importados.forEach(nuevo => {
+        let idx = clients.findIndex(x => x.pagare && x.pagare===nuevo.pagare);
+        if(idx>=0) clients[idx] = {...clients[idx], ...nuevo};
         else clients.push(nuevo);
       });
     }
 
     guardarLocal();
     renderAll();
-    setSyncStatus('✅ Sheets: ' + clientesNuevos.length + ' clientes · ' +
+    setSyncStatus('✅ ' + importados.length + ' clientes · ' +
       new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}), '#059669');
-    showToast('✅ ' + clientesNuevos.length + ' clientes cargados desde Google Sheets');
+    showToast('✅ ' + importados.length + ' clientes sincronizados desde Google Sheets');
 
   } catch(err) {
     setSyncStatus('❌ Error de sincronización', '#dc2626');
     showToast('❌ ' + err.message, 'err');
-    console.error('Sheets sync error:', err);
+    console.error(err);
   }
 }
 
-async function enviarClienteASheet(c) {
-  // Enviar un cliente al Sheet via POST
+// ── ESCRIBIR al Sheet ─────────────────────────────────────────
+async function escribirClienteEnSheet(c) {
   try {
-    await fetch(APPS_SCRIPT_URL, {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(c)
-    });
-  } catch(e) { console.warn('No se pudo enviar al Sheet:', e); }
+    // Buscar si ya existe por pagaré
+    const buscar = await fetch(SHEETDB_URL + '/search?sheet=' + encodeURIComponent(SHEET_NAME) +
+      '&ID PAGARÉ=' + encodeURIComponent(c.pagare));
+    const existe = await buscar.json();
+
+    const fila = {
+      'ID PAGARÉ':           c.pagare || '',
+      'NOMBRE DEL CLIENTE':  c.nombre || '',
+      'CÉDULA':              c.cedula || '',
+      'TELÉFONO':            c.telefono || '',
+      'PLACA':               c.placa || '',
+      'PLAN DE SERVICIO':    c.plan || '',
+      'CUOTAS PACTADAS':     c.cuotasPactadas || 1,
+      'CUOTAS PAGADAS':      c.cuotasPagadas || 0,
+      'FECHA INICIO':        c.inicio || '',
+      'ESTADO DEL SERVICIO': calcEstado(c)
+    };
+
+    if(existe && existe.length > 0) {
+      // Actualizar fila existente
+      await fetch(SHEETDB_URL + '/ID PAGARÉ/' + encodeURIComponent(c.pagare) +
+        '?sheet=' + encodeURIComponent(SHEET_NAME), {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({data: fila})
+      });
+    } else {
+      // Insertar nueva fila
+      await fetch(SHEETDB_URL + '?sheet=' + encodeURIComponent(SHEET_NAME), {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({data: [fila]})
+      });
+    }
+    console.log('✅ Sheet actualizado:', c.pagare);
+  } catch(err) {
+    console.warn('No se pudo escribir al Sheet:', err);
+  }
 }
 
 // ── PERSISTENCIA LOCAL (localStorage) ────────────────────────
