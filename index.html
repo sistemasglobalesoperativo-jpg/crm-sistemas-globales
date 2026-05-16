@@ -3533,30 +3533,92 @@ function setSyncStatus(msg, color='var(--text-muted)') {
 async function sincronizarDesdeSheet() {
   setSyncStatus('⏳ Conectando con Google Sheets...', '#f59e0b');
   try {
-    // SheetDB lee fila 1 (título) como key y fila 2 (encabezados) como valores
-    // Estructura real: [{titulo: "ID PAGARÉ"}, {titulo: "GPS-2026-001"}, ...]
-    // Fila 0 de rawData = encabezados reales (en los valores)
-    // Filas 1+ = datos reales (en los valores)
+    // Sheet ahora tiene encabezados en fila 1 — SheetDB lee directo
     const res = await fetch(SHEETDB_URL + '?limit=500');
     if(!res.ok) throw new Error('Error ' + res.status);
     let rawData = await res.json();
-    if(!Array.isArray(rawData) || rawData.length < 2)
-      throw new Error('El Sheet está vacío o sin datos suficientes');
+    if(!Array.isArray(rawData) || rawData.length === 0)
+      throw new Error('SheetDB no devolvió datos');
 
-    // Extraer encabezados reales de los VALORES de la fila 0
-    let realHeaders = Object.values(rawData[0]).map(h => (h||'').toString().replace(/\n/g,' ').trim());
-    console.log('Encabezados detectados:', realHeaders);
+    // rawData tiene SOLO la key "ID PAGARÉ" porque las celdas están combinadas
+    // Los valores de cada fila son: fila[0]=encabezado_col2, fila[1]=dato_col2...
+    // Necesitamos obtener los datos de otra forma
+    
+    // Usamos el endpoint de búsqueda para obtener todas las filas con sus datos
+    // SheetDB tiene un endpoint especial para leer por hoja con offset
+    const res2 = await fetch(SHEETDB_URL + '?sheet=BASE%20DE%20DATOS&limit=500');
+    if(!res2.ok) throw new Error('Error leyendo hoja BASE DE DATOS');
+    let sheetData = await res2.json();
+    
+    // La fila 0 tiene key=titulo, value=header_real
+    // La fila 1 tiene key=titulo, value=primer_dato
+    // Todos los datos están en el VALUE de la única key
+    
+    // Reconstruir: la fila 2 del Sheet (índice 0 de rawData) tiene los headers reales
+    // como VALUE. Las siguientes filas tienen los datos como VALUE separados por 
 
-    // Construir objetos con encabezados reales para filas 1+
-    let data = rawData.slice(1).map(row => {
-      let vals = Object.values(row);
-      let obj = {};
-      realHeaders.forEach((h, i) => { obj[h] = (vals[i]||'').toString().trim(); });
-      return obj;
-    }).filter(row => Object.values(row).some(v => v !== ''));
-
-    if(data.length === 0) throw new Error('No se encontraron datos válidos en el Sheet');
-    console.log('Primera fila de datos:', data[0]);
+    
+    // Mejor solución: leer el Sheet como tabla usando limit y offset
+    // y reconstruir manualmente desde los valores
+    
+    // Verificar si los datos vienen con la estructura de columna única
+    let singleKey = Object.keys(rawData[0]).length === 1;
+    let data = [];
+    
+    if(singleKey) {
+      // Todos los datos están aplastados en una columna
+      // Cada fila tiene el valor de UNA celda de la columna A
+      // Esto no nos da los demás campos — necesitamos otro enfoque
+      
+      // Leer directo del CSV de Google Sheets (el Sheet es accesible via SheetDB auth)
+      // Usamos el URL del spreadsheet en formato CSV
+      const SPREADSHEET_ID = '1-s6rLf8rMU6cGDLyB0YTUc3n_0CdNeoHuzryUsaNH64';
+      const csvUrl = 'https://docs.google.com/spreadsheets/d/' + SPREADSHEET_ID + 
+                     '/gviz/tq?tqx=out:csv&sheet=BASE%20DE%20DATOS';
+      
+      let csvRes;
+      try {
+        csvRes = await fetch(csvUrl);
+      } catch(e) {
+        throw new Error('No se puede leer el Sheet. Verifica que sea accesible.');
+      }
+      
+      if(!csvRes.ok) throw new Error('No se pudo leer el CSV del Sheet (¿es privado?)');
+      let csvText = await csvRes.text();
+      
+      // Parsear CSV
+      let lines = csvText.split('\n').map(l => l.replace(/\r/g,''));
+      
+      // Fila 0 = título (ignorar), Fila 1 = encabezados, Fila 2+ = datos
+      function parseCSVLine(line) {
+        let result = [], cur = '', inQ = false;
+        for(let i = 0; i < line.length; i++) {
+          let c = line[i];
+          if(c === '"') { inQ = !inQ; }
+          else if(c === ',' && !inQ) { result.push(cur.trim().replace(/^"|"$/g,'')); cur = ''; }
+          else { cur += c; }
+        }
+        result.push(cur.trim().replace(/^"|"$/g,''));
+        return result;
+      }
+      
+      let headers = parseCSVLine(lines[1]); // fila 2 del sheet = índice 1
+      console.log('Headers CSV:', headers.slice(0,8));
+      
+      for(let i = 2; i < lines.length; i++) {
+        if(!lines[i].trim()) continue;
+        let cols = parseCSVLine(lines[i]);
+        if(!cols[0]) continue;
+        let obj = {};
+        headers.forEach((h, j) => { obj[h] = cols[j] || ''; });
+        data.push(obj);
+      }
+    } else {
+      data = rawData;
+    }
+    
+    console.log('Total filas:', data.length, '| Primera:', data[0]);
+    if(data.length === 0) throw new Error('No se encontraron datos válidos');
 
     function norm(s){ return (s||'').toString().toLowerCase()
       .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
