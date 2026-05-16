@@ -3633,37 +3633,42 @@ async function sincronizarDesdeSheet() {
     }
 
     let importados = data.map((row, i) => {
-      let nombre = col(row,'NOMBRE DEL CLIENTE','nombre del cliente','nombre','cliente','razon social');
+      // Normalizar: quitar saltos de línea de los keys del objeto
+      let rowN = {};
+      Object.entries(row).forEach(([k,v]) => {
+        rowN[k.replace(/\n/g,' ').trim()] = v;
+      });
+      let nombre = col(rowN,'NOMBRE DEL CLIENTE','nombre del cliente','nombre','cliente');
       if(!nombre) return null;
-      let planRaw = (col(row,'PLAN DE SERVICIO','plan de servicio','plan','servicio') || '').toUpperCase();
+      let planRaw = (col(rowN,'PLAN DE SERVICIO','plan de servicio','plan','servicio') || '').toUpperCase();
       let plan = 'Reactivación Mensual';
       if(planRaw.includes('ESPECIAL') || planRaw.includes('CLIENTE ESP')) plan = 'Cliente Especial 10+';
       else if(planRaw.includes('PREPAGO')) plan = 'Reactivación Prepago Anual';
       else if(planRaw.includes('FINANC')) plan = 'Financiado';
       else if(planRaw.includes('CONTADO')) plan = 'Contado Anual';
-      let pagare = col(row,'ID PAGARE','ID PAGARÉ','id pagare','pagare','contrato') || '';
-      let fecha = col(row,'FECHA INICIO','fecha inicio','inicio','fecha') || '';
+      let pagare = col(rowN,'ID PAGARE','ID PAGARÉ','id pagare','pagare','contrato') || '';
+      let fecha = col(rowN,'FECHA INICIO','FECHA INICIO','fecha inicio','inicio','fecha') || '';
       if(fecha && fecha.includes('/')) {
         let p = fecha.split('/');
         if(p.length===3) fecha = p[2]+'-'+p[1].padStart(2,'0')+'-'+p[0].padStart(2,'0');
       }
       return {
-        id:             parseInt(col(row,'id')) || Date.now()+i,
+        id:             parseInt(col(rowN,'id')) || Date.now()+i,
         pagare,
         nombre:         nombre.toString(),
         tipoDoc:        'CC',
-        cedula:         col(row,'CÉDULA','cedula','documento') || '',
+        cedula:         col(rowN,'CÉDULA','CEDULA','cedula','documento') || '',
         razon:          '',
-        telefono:       col(row,'TELÉFONO','telefono','celular') || '',
-        email:          col(row,'email','correo') || '',
-        placa:          col(row,'PLACA','placa') || '',
+        telefono:       col(rowN,'TELEFONO','TELÉFONO','telefono','celular') || '',
+        email:          col(rowN,'email','correo') || '',
+        placa:          col(rowN,'PLACA','placa') || '',
         plan,
-        nVehiculos:     parseInt(col(row,'nvehiculos','n vehiculos','vehiculos')) || undefined,
+        nVehiculos:     parseInt(col(rowN,'nvehiculos','n vehiculos','vehiculos')) || undefined,
         inicio:         fecha,
-        cuotasPactadas: parseInt(col(row,'CUOTAS PACTADAS','cuotas pactada s','cuotas pactadas','pactadas')) || 1,
-        cuotasPagadas:  parseInt(col(row,'CUOTAS PAGADAS','cuotas pagadas')) || 0,
-        obs:            col(row,'obs','observaciones') || '',
-        direccion:      col(row,'direccion') || '',
+        cuotasPactadas: parseInt(col(rowN,'CUOTAS PACTADAS','cuotas pactadas','pactadas')) || 1,
+        cuotasPagadas:  parseInt(col(rowN,'CUOTAS PAGADAS','cuotas pagadas')) || 0,
+        obs:            col(rowN,'OBSERVACIONES','obs','observaciones') || '',
+        direccion:      col(rowN,'direccion') || '',
         pagos:          []
       };
     }).filter(Boolean);
