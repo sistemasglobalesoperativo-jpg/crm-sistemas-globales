@@ -3533,35 +3533,54 @@ function setSyncStatus(msg, color='var(--text-muted)') {
 async function sincronizarDesdeSheet() {
   setSyncStatus('⏳ Conectando con Google Sheets...', '#f59e0b');
   try {
-    const res = await fetch(SHEETDB_URL + '?sheet=' + encodeURIComponent(SHEET_NAME));
+    // SheetDB lee fila 1 (título) como key y fila 2 (encabezados) como valores
+    // Estructura real: [{titulo: "ID PAGARÉ"}, {titulo: "GPS-2026-001"}, ...]
+    // Fila 0 de rawData = encabezados reales (en los valores)
+    // Filas 1+ = datos reales (en los valores)
+    const res = await fetch(SHEETDB_URL + '?limit=500');
     if(!res.ok) throw new Error('Error ' + res.status);
-    const data = await res.json();
-    if(!Array.isArray(data) || data.length === 0)
-      throw new Error('El Sheet está vacío');
+    let rawData = await res.json();
+    if(!Array.isArray(rawData) || rawData.length < 2)
+      throw new Error('El Sheet está vacío o sin datos suficientes');
 
+    // Extraer encabezados reales de los VALORES de la fila 0
+    let realHeaders = Object.values(rawData[0]).map(h => (h||'').toString().replace(/\n/g,' ').trim());
+    console.log('Encabezados detectados:', realHeaders);
+
+    // Construir objetos con encabezados reales para filas 1+
+    let data = rawData.slice(1).map(row => {
+      let vals = Object.values(row);
+      let obj = {};
+      realHeaders.forEach((h, i) => { obj[h] = (vals[i]||'').toString().trim(); });
+      return obj;
+    }).filter(row => Object.values(row).some(v => v !== ''));
+
+    if(data.length === 0) throw new Error('No se encontraron datos válidos en el Sheet');
+    console.log('Primera fila de datos:', data[0]);
+
+    function norm(s){ return (s||'').toString().toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/\n/g,' ').replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim(); }
     function col(obj, ...keys) {
       for(let k of keys) {
-        let nk = k.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'_');
-        let found = Object.entries(obj).find(([h]) => {
-          let nh = h.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'_');
-          return nh === nk;
-        });
+        let nk = norm(k);
+        let found = Object.entries(obj).find(([h]) => norm(h) === nk);
         if(found && found[1] !== '' && found[1] !== undefined) return found[1];
       }
       return '';
     }
 
     let importados = data.map((row, i) => {
-      let nombre = col(row,'NOMBRE DEL CLIENTE','nombre del cliente','nombre','cliente');
+      let nombre = col(row,'NOMBRE DEL CLIENTE','nombre del cliente','nombre','cliente','razon social');
       if(!nombre) return null;
-      let planRaw = (col(row,'PLAN DE SERVICIO','plan de servicio','plan') || '').toUpperCase();
+      let planRaw = (col(row,'PLAN DE SERVICIO','plan de servicio','plan','servicio') || '').toUpperCase();
       let plan = 'Reactivación Mensual';
       if(planRaw.includes('ESPECIAL') || planRaw.includes('CLIENTE ESP')) plan = 'Cliente Especial 10+';
       else if(planRaw.includes('PREPAGO')) plan = 'Reactivación Prepago Anual';
       else if(planRaw.includes('FINANC')) plan = 'Financiado';
       else if(planRaw.includes('CONTADO')) plan = 'Contado Anual';
-      let pagare = col(row,'ID PAGARÉ','id pagare','pagare','contrato') || '';
-      let fecha = col(row,'FECHA INICIO','fecha inicio','inicio') || '';
+      let pagare = col(row,'ID PAGARE','ID PAGARÉ','id pagare','pagare','contrato') || '';
+      let fecha = col(row,'FECHA INICIO','fecha inicio','inicio','fecha') || '';
       if(fecha && fecha.includes('/')) {
         let p = fecha.split('/');
         if(p.length===3) fecha = p[2]+'-'+p[1].padStart(2,'0')+'-'+p[0].padStart(2,'0');
@@ -3579,7 +3598,7 @@ async function sincronizarDesdeSheet() {
         plan,
         nVehiculos:     parseInt(col(row,'nvehiculos','n vehiculos','vehiculos')) || undefined,
         inicio:         fecha,
-        cuotasPactadas: parseInt(col(row,'CUOTAS PACTADAS','cuotas pactadas','cuotas pactada s')) || 1,
+        cuotasPactadas: parseInt(col(row,'CUOTAS PACTADAS','cuotas pactada s','cuotas pactadas','pactadas')) || 1,
         cuotasPagadas:  parseInt(col(row,'CUOTAS PAGADAS','cuotas pagadas')) || 0,
         obs:            col(row,'obs','observaciones') || '',
         direccion:      col(row,'direccion') || '',
