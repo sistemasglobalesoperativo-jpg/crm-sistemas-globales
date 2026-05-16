@@ -3546,8 +3546,8 @@ async function sincronizarDesdeSheet() {
     
     // Usamos el endpoint de búsqueda para obtener todas las filas con sus datos
     // SheetDB tiene un endpoint especial para leer por hoja con offset
-    const res2 = await fetch(SHEETDB_URL + '?sheet=BASE%20DE%20DATOS&limit=500');
-    if(!res2.ok) throw new Error('Error leyendo hoja BASE DE DATOS');
+    const res2 = await fetch(SHEETDB_URL + '?limit=500');
+    if(!res2.ok) throw new Error('Error ' + res2.status + ': ' + await res2.text());
     let sheetData = await res2.json();
     
     // La fila 0 tiene key=titulo, value=header_real
@@ -3717,8 +3717,7 @@ async function sincronizarDesdeSheet() {
 async function escribirClienteEnSheet(c) {
   try {
     // Buscar si ya existe por pagaré
-    const buscar = await fetch(SHEETDB_URL + '/search?sheet=' + encodeURIComponent(SHEET_NAME) +
-      '&ID PAGARÉ=' + encodeURIComponent(c.pagare));
+    const buscar = await fetch(SHEETDB_URL + '/search?ID PAGARÉ=' + encodeURIComponent(c.pagare));
     const existe = await buscar.json();
 
     const fila = {
@@ -3737,14 +3736,14 @@ async function escribirClienteEnSheet(c) {
     if(existe && existe.length > 0) {
       // Actualizar fila existente
       await fetch(SHEETDB_URL + '/ID PAGARÉ/' + encodeURIComponent(c.pagare) +
-        '?sheet=' + encodeURIComponent(SHEET_NAME), {
+        '{', {
         method: 'PATCH',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({data: fila})
       });
     } else {
       // Insertar nueva fila
-      await fetch(SHEETDB_URL + '?sheet=' + encodeURIComponent(SHEET_NAME), {
+      await fetch(SHEETDB_URL, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({data: [fila]})
